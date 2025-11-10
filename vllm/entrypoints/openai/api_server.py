@@ -273,6 +273,14 @@ async def create_completion(raw_request: Request):
 
 
 if __name__ == "__main__":
+
+    # (Don)
+    # 1. set up async engine args from CLI
+    # 2. create async engine from engine args   
+    # 3. create tokenizer from model name
+    # 4. run uvicorn server
+
+
     parser = argparse.ArgumentParser(
         description="vLLM OpenAI-Compatible RESTful API server."
     )
