@@ -204,6 +204,7 @@ class LLMEngine:
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         use_cached_outputs: bool = False,
     ) -> None:
+        print("[TRACE] (llm_engine.py) LLMEngine.__init__() called")
         if envs.VLLM_USE_V1:
             raise ValueError(
                 "Using V0 LLMEngine, but envs.VLLM_USE_V1=True. "
@@ -211,6 +212,7 @@ class LLMEngine:
                 "LLMEngine.from_vllm_config(...) or explicitly set "
                 "VLLM_USE_V1=0 or 1 and report this issue on Github.")
 
+        print("[TRACE] (llm_engine.py) Setting up engine configuration")
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -224,6 +226,7 @@ class LLMEngine:
         )
         self.observability_config = vllm_config.observability_config or ObservabilityConfig(  # noqa
         )
+        print("[TRACE] (llm_engine.py) Configuration setup completed")
 
         logger.info(
             "Initializing a V0 LLM engine (v%s) with config: %s, "
@@ -236,7 +239,9 @@ class LLMEngine:
         self.log_stats = log_stats
         self.use_cached_outputs = use_cached_outputs
 
+        print("[TRACE] (llm_engine.py) Initializing tokenizer")
         if self.model_config.skip_tokenizer_init:
+            print("[TRACE] (llm_engine.py) Skipping tokenizer initialization")
             self.tokenizer = None
             self.detokenizer = None
             tokenizer_group = None
@@ -244,6 +249,7 @@ class LLMEngine:
             self.tokenizer = self._init_tokenizer()
             self.detokenizer = Detokenizer(self.tokenizer)
             tokenizer_group = self.get_tokenizer_group()
+            print("[TRACE] (llm_engine.py) Tokenizer initialized successfully")
 
         # Ensure that the function doesn't contain a reference to self,
         # to avoid engine GC issues
@@ -256,14 +262,19 @@ class LLMEngine:
         self.generation_config_fields = (
             self.model_config.try_get_generation_config())
 
+        print("[TRACE] (llm_engine.py) Initializing input preprocessor")
         self.input_preprocessor = InputPreprocessor(self.model_config,
                                                     self.tokenizer,
                                                     mm_registry)
 
+        print("[TRACE] (llm_engine.py) Creating model executor")
         self.model_executor = executor_class(vllm_config=vllm_config)
+        print("[TRACE] (llm_engine.py) Model executor created successfully")
 
+        print("[TRACE] (llm_engine.py) Initializing KV caches")
         if self.model_config.runner_type != "pooling":
             self._initialize_kv_caches()
+        print("[TRACE] (llm_engine.py) KV caches initialization completed")
 
         # If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
@@ -673,6 +684,7 @@ class LLMEngine:
             >>> # continue the request processing
             >>> ...
         """
+        print(f"[TRACE] (llm_engine.py) add_request() called - request_id: {request_id}")
         if not isinstance(request_id, str):
             raise TypeError(
                 f"request_id must be a string, got {type(request_id)}")
@@ -802,9 +814,11 @@ class LLMEngine:
             >>> # abort the request
             >>> engine.abort_request(request_id)
         """
+        print(f"[TRACE] (llm_engine.py) abort_request() called - request_id: {request_id}")
         for scheduler in self.scheduler:
             scheduler.abort_seq_group(
                 request_id, seq_id_to_seq_group=self.seq_id_to_seq_group)
+        print("[TRACE] (llm_engine.py) Request aborted successfully")
 
     def get_vllm_config(self) -> VllmConfig:
         """Gets the vllm configuration."""
@@ -1243,6 +1257,7 @@ class LLMEngine:
                 break
         ```
         """
+        print("[TRACE] (llm_engine.py) step() called")
         if self.parallel_config.pipeline_parallel_size > 1:
             raise NotImplementedError(
                 "Pipeline parallelism is only supported through AsyncLLMEngine "
@@ -1273,9 +1288,11 @@ class LLMEngine:
                 seq_group_metadata_list
         ) and not self._skip_scheduling_next_step:
             # Schedule iteration
+            print("[TRACE] (llm_engine.py) Running scheduler")
             (seq_group_metadata_list, scheduler_outputs,
              allow_async_output_proc
              ) = self.scheduler[virtual_engine].schedule()
+            print(f"[TRACE] (llm_engine.py) Scheduler returned {len(seq_group_metadata_list)} seq groups")
 
             ctx.seq_group_metadata_list = seq_group_metadata_list
             ctx.scheduler_outputs = scheduler_outputs
@@ -1306,6 +1323,7 @@ class LLMEngine:
         assert scheduler_outputs is not None
 
         if not scheduler_outputs.is_empty():
+            print("[TRACE] (llm_engine.py) Scheduler output not empty, preparing model execution")
 
             # Check if we have a cached last_output from the previous iteration.
             # For supporting PP this is probably the best way to pass the
@@ -1331,13 +1349,16 @@ class LLMEngine:
                     virtual_engine]
 
             try:
+                print("[TRACE] (llm_engine.py) Executing model")
                 outputs = self.model_executor.execute_model(
                     execute_model_req=execute_model_req)
+                print(f"[TRACE] (llm_engine.py) Model execution completed, outputs: {len(outputs)}")
                 self._skip_scheduling_next_step = False
             except InputProcessingError as e:
                 # The input for this request cannot be processed, so we must
                 # abort it. If there are remaining requests in the batch that
                 # have been scheduled, they will be retried on the next step.
+                print(f"[TRACE] (llm_engine.py) InputProcessingError caught for request: {e.request_id}")
                 invalid_request_id = e.request_id
                 self._abort_and_cache_schedule(
                     request_id=invalid_request_id,
@@ -1353,6 +1374,7 @@ class LLMEngine:
             if self.scheduler_config.is_multi_step:
                 self._update_cached_scheduler_output(virtual_engine, outputs)
         else:
+            print("[TRACE] (llm_engine.py) Scheduler output is empty, no model execution needed")
             # Nothing scheduled => If there is pending async postprocessor,
             # then finish it here.
             if len(ctx.output_queue) > 0:
@@ -1419,6 +1441,7 @@ class LLMEngine:
             logger.debug("Stopping remote worker execution loop.")
             self.model_executor.stop_remote_worker_execution_loop()
 
+        print(f"[TRACE] (llm_engine.py) step() returning {len(ctx.request_outputs)} request outputs")
         return ctx.request_outputs
 
     def _abort_and_cache_schedule(

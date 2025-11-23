@@ -67,20 +67,24 @@ class OpenAIServingChat(OpenAIServing):
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
     ) -> None:
+        print("[TRACE] (serving_chat.py) OpenAIServingChat.__init__() called")
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          models=models,
                          request_logger=request_logger,
                          return_tokens_as_token_ids=return_tokens_as_token_ids,
                          enable_force_include_usage=enable_force_include_usage)
+        print("[TRACE] (serving_chat.py) Parent class initialized")
 
         self.response_role = response_role
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
+        print(f"[TRACE] (serving_chat.py) Response role: {response_role}, chat_template set")
 
         # set up tool use
         self.enable_auto_tools: bool = enable_auto_tools
         if self.enable_auto_tools:
+            print("[TRACE] (serving_chat.py) Auto tools enabled")
             logger.info(
                 "\"auto\" tool choice has been enabled please note that while"
                 " the parallel_tool_calls client option is preset for "
@@ -89,16 +93,19 @@ class OpenAIServingChat(OpenAIServing):
         self.reasoning_parser: Optional[Callable[[AnyTokenizer],
                                                  ReasoningParser]] = None
         if reasoning_parser:
+            print(f"[TRACE] (serving_chat.py) Setting up reasoning parser: {reasoning_parser}")
             try:
                 self.reasoning_parser = (
                     ReasoningParserManager.get_reasoning_parser(
                         reasoning_parser))
                 assert self.reasoning_parser is not None
+                print("[TRACE] (serving_chat.py) Reasoning parser initialized")
             except Exception as e:
                 raise TypeError(
                     f"{reasoning_parser=} has not been registered") from e
         self.tool_parser: Optional[Callable[[AnyTokenizer], ToolParser]] = None
         if self.enable_auto_tools:
+            print(f"[TRACE] (serving_chat.py) Setting up tool parser: {tool_parser}")
             try:
                 if (tool_parser == "pythonic" and
                         model_config.model.startswith("meta-llama/Llama-3.2")):
@@ -107,6 +114,7 @@ class OpenAIServingChat(OpenAIServing):
                         " tool calls")
                 self.tool_parser = ToolParserManager.get_tool_parser(
                     tool_parser)
+                print("[TRACE] (serving_chat.py) Tool parser initialized")
             except Exception as e:
                 raise TypeError("Error: --enable-auto-tool-choice requires "
                                 f"tool_parser:'{tool_parser}' which has not "
@@ -119,8 +127,10 @@ class OpenAIServingChat(OpenAIServing):
         if self.default_sampling_params:
             source = self.model_config.generation_config
             source = "model" if source == "auto" else source
+            print(f"[TRACE] (serving_chat.py) Default sampling params set from {source}")
             logger.info("Using default chat sampling params from %s: %s",
                         source, self.default_sampling_params)
+        print("[TRACE] (serving_chat.py) OpenAIServingChat.__init__() completed")
 
     async def create_chat_completion(
         self,
@@ -135,8 +145,10 @@ class OpenAIServingChat(OpenAIServing):
         for the API specification. This API mimics the OpenAI
         Chat Completion API.
         """
+        print(f"[TRACE] (serving_chat.py) create_chat_completion() called - model: {request.model}")
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
+            print(f"[TRACE] (serving_chat.py) Model check failed: {error_check_ret}")
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
 
@@ -144,15 +156,20 @@ class OpenAIServingChat(OpenAIServing):
         # This is required for the streaming case, where we return a
         # success status before we actually start generating text :).
         if self.engine_client.errored:
+            print("[TRACE] (serving_chat.py) Engine client has errors, raising dead_error")
             raise self.engine_client.dead_error
 
         try:
+            print("[TRACE] (serving_chat.py) Processing request...")
             lora_request = self._maybe_get_adapters(
                 request, supports_default_mm_loras=True)
 
             model_name = self._get_model_name(request.model, lora_request)
+            print(f"[TRACE] (serving_chat.py) Model name: {model_name}")
 
+            print("[TRACE] (serving_chat.py) Getting tokenizer...")
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
+            print("[TRACE] (serving_chat.py) Tokenizer retrieved")
 
             tool_parser = self.tool_parser
 
@@ -160,6 +177,7 @@ class OpenAIServingChat(OpenAIServing):
                 # because of issues with pydantic we need to potentially
                 # re-serialize the tool_calls field of the request
                 # for more info: see comment in `maybe_serialize_tool_calls`
+                print("[TRACE] (serving_chat.py) Mistral tokenizer detected, serializing tool calls")
                 maybe_serialize_tool_calls(request)
                 truncate_tool_call_ids(request)
                 validate_request_params(request)
@@ -169,6 +187,7 @@ class OpenAIServingChat(OpenAIServing):
                     and not isinstance(tokenizer, MistralTokenizer)):
                 # for hf tokenizers, "auto" tools requires
                 # --enable-auto-tool-choice and --tool-call-parser
+                print("[TRACE] (serving_chat.py) Error: auto tool choice requires specific setup")
                 return self.create_error_response(
                     "\"auto\" tool choice requires "
                     "--enable-auto-tool-choice and --tool-call-parser to be set"
@@ -176,9 +195,12 @@ class OpenAIServingChat(OpenAIServing):
 
             if request.tools is None:
                 tool_dicts = None
+                print("[TRACE] (serving_chat.py) No tools in request")
             else:
                 tool_dicts = [tool.model_dump() for tool in request.tools]
+                print(f"[TRACE] (serving_chat.py) Tools found: {len(tool_dicts)} tools")
 
+            print("[TRACE] Preprocessing chat...")
             (
                 conversation,
                 request_prompts,
@@ -198,13 +220,16 @@ class OpenAIServingChat(OpenAIServing):
                 truncate_prompt_tokens=request.truncate_prompt_tokens,
                 add_special_tokens=request.add_special_tokens,
             )
+            print(f"[TRACE] Chat preprocessed - {len(engine_prompts)} prompts")
         except (ValueError, TypeError, RuntimeError,
                 jinja2.TemplateError) as e:
+            print(f"[TRACE] Error in preprocessing: {e}")
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(f"{e} {e.__cause__}")
 
         request_id = "chatcmpl-" \
                      f"{self._base_request_id(raw_request, request.request_id)}"
+        print(f"[TRACE] Request ID generated: {request_id}")
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
@@ -213,7 +238,9 @@ class OpenAIServingChat(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
+            print("[TRACE] Creating generators for engine prompts...")
             for i, engine_prompt in enumerate(engine_prompts):
+                print(f"[TRACE] Processing prompt {i+1}/{len(engine_prompts)}")
                 sampling_params: Union[SamplingParams, BeamSearchParams]
 
                 if self.default_sampling_params is None:
@@ -224,8 +251,10 @@ class OpenAIServingChat(OpenAIServing):
                     request=request,
                     input_length=len(engine_prompt["prompt_token_ids"]),
                     default_sampling_params=self.default_sampling_params)
+                print(f"[TRACE] Max tokens: {max_tokens}")
 
                 if request.use_beam_search:
+                    print("[TRACE] Using beam search parameters")
                     sampling_params = request.to_beam_search_params(
                         max_tokens, self.default_sampling_params)
                 else:
@@ -242,6 +271,7 @@ class OpenAIServingChat(OpenAIServing):
                                  self._get_trace_headers(raw_request.headers))
 
                 if isinstance(sampling_params, BeamSearchParams):
+                    print("[TRACE] Calling beam_search()")
                     generator = self.engine_client.beam_search(
                         prompt=engine_prompt,
                         request_id=request_id,
@@ -249,6 +279,7 @@ class OpenAIServingChat(OpenAIServing):
                         lora_request=lora_request,
                     )
                 else:
+                    print("[TRACE] Calling generate()")
                     generator = self.engine_client.generate(
                         engine_prompt,
                         sampling_params,
@@ -261,13 +292,16 @@ class OpenAIServingChat(OpenAIServing):
                 generators.append(generator)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
+            print(f"[TRACE] Error creating generators: {e}")
             return self.create_error_response(str(e))
 
         assert len(generators) == 1
         result_generator, = generators
+        print("[TRACE] Generator created successfully")
 
         # Streaming response
         if request.stream:
+            print("[TRACE] Streaming mode - returning stream generator")
             return self.chat_completion_stream_generator(
                 request,
                 result_generator,
@@ -279,11 +313,13 @@ class OpenAIServingChat(OpenAIServing):
                 enable_force_include_usage=self.enable_force_include_usage)
 
         try:
+            print("[TRACE] Non-streaming mode - returning full response")
             return await self.chat_completion_full_generator(
                 request, result_generator, request_id, model_name,
                 conversation, tokenizer, request_metadata)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
+            print(f"[TRACE] Error in full generator: {e}")
             return self.create_error_response(str(e))
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:

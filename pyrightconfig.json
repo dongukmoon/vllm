@@ -1,0 +1,25 @@
+{
+    "include": ["vllm"],
+    "exclude": [
+        "**/node_modules",
+        "**/__pycache__",
+        ".git",
+        "build",
+        "dist",
+        "*.egg-info"
+    ],
+    "typeCheckingMode": "basic",
+    "pythonVersion": "3.12",
+    "pythonPlatform": "Linux",
+    "reportMissingImports": true,
+    "reportMissingTypeStubs": false,
+    "reportUnnecessaryIsInstance": true,
+    "reportUnnecessaryCast": true,
+    "reportUnnecessaryComparison": true,
+    "reportUnusedImport": true,
+    "reportUnusedVariable": true,
+    "reportUnusedClass": true,
+    "reportUnusedFunction": true,
+    "reportUnusedExpression": true,
+    "reportConstantRedefinition": true
+}

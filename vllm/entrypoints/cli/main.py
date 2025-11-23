@@ -10,6 +10,7 @@ import importlib.metadata
 
 
 def main():
+    print("[TRACE] (main.py) vLLM CLI main() called")
     import vllm.entrypoints.cli.benchmark.main
     import vllm.entrypoints.cli.collect_env
     import vllm.entrypoints.cli.openai
@@ -26,8 +27,11 @@ def main():
         vllm.entrypoints.cli.run_batch,
     ]
 
+    print("[TRACE] (main.py) Running cli_env_setup()")
     cli_env_setup()
+    print("[TRACE] (main.py) cli_env_setup() completed")
 
+    print("[TRACE] Creating argument parser")
     parser = FlexibleArgumentParser(
         description="vLLM CLI",
         epilog=VLLM_SUBCMD_PARSER_EPILOG,
@@ -47,12 +51,16 @@ def main():
                 dispatch_function=cmd.cmd)
             cmds[cmd.name] = cmd
     args = parser.parse_args()
+    print(f"[TRACE] (main.py) Arguments parsed, subparser: {args.subparser}")
     if args.subparser in cmds:
+        print(f"[TRACE] Validating arguments for subcommand: {args.subparser}")
         cmds[args.subparser].validate(args)
 
     if hasattr(args, "dispatch_function"):
+        print(f"[TRACE] (main.py) Dispatching to {args.subparser} command")
         args.dispatch_function(args)
     else:
+        print("[TRACE] (main.py) No subcommand specified, printing help")
         parser.print_help()
 
 

@@ -419,12 +419,15 @@ def engine_client(request: Request) -> EngineClient:
 @router.get("/health", response_class=Response)
 async def health(raw_request: Request) -> Response:
     """Health check."""
+    print("[TRACE] Health check endpoint called")
     await engine_client(raw_request).check_health()
+    print("[TRACE] Health check passed")
     return Response(status_code=200)
 
 
 @router.get("/load")
 async def get_server_load_metrics(request: Request):
+    print("[TRACE] Server load metrics endpoint called")
     # This endpoint returns the current server load metrics.
     # It tracks requests utilizing the GPU from the following routes:
     # - /v1/chat/completions
@@ -439,14 +442,17 @@ async def get_server_load_metrics(request: Request):
     # - /rerank
     # - /v1/rerank
     # - /v2/rerank
+    load = request.app.state.server_load_metrics
+    print(f"[TRACE] (api_server.py) Current server load: {load}")
     return JSONResponse(
-        content={'server_load': request.app.state.server_load_metrics})
+        content={'server_load': load})
 
 
 @router.get("/ping", response_class=Response)
 @router.post("/ping", response_class=Response)
 async def ping(raw_request: Request) -> Response:
     """Ping check. Endpoint required for SageMaker"""
+    print("[TRACE] Ping endpoint called")
     return await health(raw_request)
 
 
@@ -468,6 +474,12 @@ async def ping(raw_request: Request) -> Response:
              })
 @with_cancellation
 async def tokenize(request: TokenizeRequest, raw_request: Request):
+    print(f"[TRACE] Tokenize endpoint called - model: {request.model}")
+    handler = tokenizer(raw_request)
+    if handler is None:
+        print("[TRACE] Tokenizer handler is None")
+        return base(raw_request).create_error_response(
+            message="The model does not support Tokenize API")
     handler = tokenization(raw_request)
 
     try:
@@ -503,20 +515,26 @@ async def tokenize(request: TokenizeRequest, raw_request: Request):
              })
 @with_cancellation
 async def detokenize(request: DetokenizeRequest, raw_request: Request):
+    print(f"[TRACE] Detokenize endpoint called - model: {request.model}")
     handler = tokenization(raw_request)
+    print("[TRACE] Got tokenization handler")
 
     try:
         generator = await handler.create_detokenize(request, raw_request)
     except OverflowError as e:
+        print(f"[TRACE] (api_server.py) OverflowError in detokenize: {e}")
         raise RequestValidationError(errors=[str(e)]) from e
     except Exception as e:
+        print(f"[TRACE] (api_server.py) Exception in detokenize: {e}")
         raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
                             detail=str(e)) from e
 
     if isinstance(generator, ErrorResponse):
+        print(f"[TRACE] (api_server.py) Error response: {generator.message}")
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
     elif isinstance(generator, DetokenizeResponse):
+        print("[TRACE] (api_server.py) Detokenize response ready")
         return JSONResponse(content=generator.model_dump())
 
     assert_never(generator)
@@ -636,20 +654,26 @@ async def cancel_responses(response_id: str, raw_request: Request):
 @load_aware_call
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
+    print(f"[TRACE] Chat completions endpoint called - model: {request.model}")
     handler = chat(raw_request)
     if handler is None:
+        print("[TRACE] Chat handler is None - model not supported")
         return base(raw_request).create_error_response(
             message="The model does not support Chat Completions API")
 
+    print(f"[TRACE] (api_server.py) Creating chat completion - stream: {request.stream}")
     generator = await handler.create_chat_completion(request, raw_request)
 
     if isinstance(generator, ErrorResponse):
+        print(f"[TRACE] (api_server.py) Error response generated: {generator.message}")
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
 
     elif isinstance(generator, ChatCompletionResponse):
+        print("[TRACE] (api_server.py) Returning non-streaming chat completion response")
         return JSONResponse(content=generator.model_dump())
 
+    print("[TRACE] (api_server.py) Returning streaming chat completion response")
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
@@ -674,8 +698,10 @@ async def create_chat_completion(request: ChatCompletionRequest,
 @with_cancellation
 @load_aware_call
 async def create_completion(request: CompletionRequest, raw_request: Request):
+    print(f"[TRACE] Completions endpoint called - model: {request.model}")
     handler = completion(raw_request)
     if handler is None:
+        print("[TRACE] Completion handler is None - model not supported")
         return base(raw_request).create_error_response(
             message="The model does not support Completions API")
 
@@ -710,17 +736,22 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 @with_cancellation
 @load_aware_call
 async def create_embedding(request: EmbeddingRequest, raw_request: Request):
+    print(f"[TRACE] (api_server.py) Embeddings endpoint called - model: {request.model}")
     handler = embedding(raw_request)
     if handler is None:
+        print("[TRACE] (api_server.py) Embedding handler is None - model not supported")
         return base(raw_request).create_error_response(
             message="The model does not support Embeddings API")
 
+    print(f"[TRACE] (api_server.py) Creating embeddings - input items: {len(request.input) if isinstance(request.input, list) else 1}")
     generator = await handler.create_embedding(request, raw_request)
 
     if isinstance(generator, ErrorResponse):
+        print(f"[TRACE] (api_server.py) Error in embeddings: {generator.message}")
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
     elif isinstance(generator, EmbeddingResponse):
+        print("[TRACE] (api_server.py) Embeddings response ready")
         return JSONResponse(content=generator.model_dump())
 
     assert_never(generator)
@@ -1751,9 +1782,11 @@ def validate_api_server_args(args):
 def setup_server(args):
     """Validate API server args, set up signal handler, create socket
     ready to serve."""
+    print("[TRACE] (api_server.py) setup_server() called")
 
     logger.info("vLLM API server version %s", VLLM_VERSION)
     log_non_default_args(args)
+    print(f"[TRACE] (api_server.py) API server version logged, host={args.host}, port={args.port}")
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
@@ -1764,7 +1797,9 @@ def setup_server(args):
     # This avoids race conditions with ray.
     # see https://github.com/vllm-project/vllm/issues/8204
     sock_addr = (args.host or "", args.port)
+    print("[TRACE] Creating server socket")
     sock = create_server_socket(sock_addr)
+    print(f"[TRACE] Server socket created at {sock_addr}")
 
     # workaround to avoid footguns where uvicorn drops requests with too
     # many concurrent requests active
@@ -1781,13 +1816,16 @@ def setup_server(args):
     host_part = f"[{addr}]" if is_valid_ipv6_address(
         addr) else addr or "0.0.0.0"
     listen_address = f"http{'s' if is_ssl else ''}://{host_part}:{port}"
+    print(f"[TRACE] setup_server() completed - listen_address: {listen_address}")
 
     return listen_address, sock
 
 
 async def run_server(args, **uvicorn_kwargs) -> None:
     """Run a single-worker API server."""
+    print("[TRACE] run_server() called")
     listen_address, sock = setup_server(args)
+    print(f"[TRACE] run_server() calling run_server_worker with listen_address: {listen_address}")
     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
 
 
@@ -1797,26 +1835,34 @@ async def run_server_worker(listen_address,
                             client_config=None,
                             **uvicorn_kwargs) -> None:
     """Run a single API server worker."""
+    print("[TRACE] run_server_worker() called")
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
 
     server_index = client_config.get("client_index", 0) if client_config else 0
+    print(f"[TRACE] Server index: {server_index}")
 
     # Load logging config for uvicorn if specified
+    print("[TRACE] Loading log config")
     log_config = load_log_config(args.log_config_file)
     if log_config is not None:
         uvicorn_kwargs['log_config'] = log_config
 
+    print("[TRACE] Building async engine client")
     async with build_async_engine_client(args, client_config) as engine_client:
         maybe_register_tokenizer_info_endpoint(args)
+        print("[TRACE] Building FastAPI app")
         app = build_app(args)
 
+        print("[TRACE] Getting vLLM config from engine client")
         vllm_config = await engine_client.get_vllm_config()
+        print("[TRACE] Initializing app state")
         await init_app_state(engine_client, vllm_config, app.state, args)
 
         logger.info("Starting vLLM API server %d on %s", server_index,
                     listen_address)
+        print(f"[TRACE] Starting HTTP server on {listen_address}")
         shutdown_task = await serve_http(
             app,
             sock=sock,
@@ -1834,12 +1880,15 @@ async def run_server_worker(listen_address,
             ssl_cert_reqs=args.ssl_cert_reqs,
             **uvicorn_kwargs,
         )
+        print("[TRACE] HTTP server started, waiting for shutdown")
 
     # NB: Await server shutdown only after the backend context is exited
     try:
         await shutdown_task
+        print("[TRACE] Server shutdown complete")
     finally:
         sock.close()
+        print("[TRACE] Socket closed")
 
 
 if __name__ == "__main__":

@@ -60,6 +60,7 @@ class OpenAIServingCompletion(OpenAIServing):
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
     ):
+        print("[TRACE] (serving_completion.py) OpenAIServingCompletion.__init__() called")
         super().__init__(
             engine_client=engine_client,
             model_config=model_config,
@@ -68,9 +69,11 @@ class OpenAIServingCompletion(OpenAIServing):
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             enable_force_include_usage=enable_force_include_usage,
         )
+        print("[TRACE] (serving_completion.py) Parent class initialized")
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.default_sampling_params = (
             self.model_config.get_diff_sampling_param())
+        print(f"[TRACE] (serving_completion.py) Default sampling params set: {self.default_sampling_params is not None}")
         if self.default_sampling_params:
             source = self.model_config.generation_config
             source = "model" if source == "auto" else source
@@ -79,6 +82,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 source,
                 self.default_sampling_params,
             )
+        print("[TRACE] (serving_completion.py) OpenAIServingCompletion.__init__() completed")
 
     async def create_completion(
         self,
@@ -94,27 +98,33 @@ class OpenAIServingCompletion(OpenAIServing):
             - suffix (the language models we currently support do not support
             suffix)
         """
+        print(f"[TRACE] (serving_completion.py) create_completion() called - model: {request.model}")
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
+            print("[TRACE] (serving_completion.py) Model check failed")
             return error_check_ret
 
         # If the engine is dead, raise the engine's DEAD_ERROR.
         # This is required for the streaming case, where we return a
         # success status before we actually start generating text :).
         if self.engine_client.errored:
+            print("[TRACE] (serving_completion.py) Engine client is errored, raising dead error")
             raise self.engine_client.dead_error
 
         # Return error for unsupported features.
         if request.suffix is not None:
+            print("[TRACE] (serving_completion.py) Request has unsupported suffix feature")
             return self.create_error_response(
                 "suffix is not currently supported")
 
         if request.echo and request.prompt_embeds is not None:
+            print("[TRACE] (serving_completion.py) Request has unsupported echo with prompt embeds")
             return self.create_error_response(
                 "Echo is unsupported with prompt embeds.")
 
         request_id = f"cmpl-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
+        print(f"[TRACE] (serving_completion.py) Request ID generated: {request_id}")
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
@@ -122,9 +132,12 @@ class OpenAIServingCompletion(OpenAIServing):
 
         try:
             lora_request = self._maybe_get_adapters(request)
+            print("[TRACE] (serving_completion.py) Adapters retrieved")
 
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
+            print("[TRACE] (serving_completion.py) Tokenizer retrieved")
 
+            print("[TRACE] (serving_completion.py) Starting prompt preprocessing")
             request_prompts, engine_prompts = await self._preprocess_completion(
                 request,
                 tokenizer,
@@ -132,23 +145,30 @@ class OpenAIServingCompletion(OpenAIServing):
                 truncate_prompt_tokens=request.truncate_prompt_tokens,
                 add_special_tokens=request.add_special_tokens,
             )
+            print(f"[TRACE] (serving_completion.py) Preprocessing completed - generated {len(engine_prompts)} engine prompts")
         except ValueError as e:
+            print("[TRACE] (serving_completion.py) ValueError during preprocessing")
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
         except TypeError as e:
+            print("[TRACE] (serving_completion.py) TypeError during preprocessing")
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
         except RuntimeError as e:
+            print("[TRACE] (serving_completion.py) RuntimeError during preprocessing")
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
         except jinja2.TemplateError as e:
+            print("[TRACE] (serving_completion.py) TemplateError during preprocessing")
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
         # Schedule the request and get the result generator.
+        print("[TRACE] (serving_completion.py) Creating generators for each prompt")
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
+                print(f"[TRACE] (serving_completion.py) Processing engine prompt {i}")
                 sampling_params: Union[SamplingParams, BeamSearchParams]
                 # Mypy does not infer that engine_prompt will have only one of
                 # "prompt_token_ids" or "prompt_embeds" defined, and both of
@@ -178,9 +198,11 @@ class OpenAIServingCompletion(OpenAIServing):
                 )
 
                 if request.use_beam_search:
+                    print("[TRACE] (serving_completion.py) Using beam search sampling params")
                     sampling_params = request.to_beam_search_params(
                         max_tokens, self.default_sampling_params)
                 else:
+                    print("[TRACE] (serving_completion.py) Using standard sampling params")
                     sampling_params = request.to_sampling_params(
                         max_tokens,
                         self.model_config.logits_processor_pattern,
@@ -205,6 +227,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 engine_prompt = cast(Union[EmbedsPrompt, TokensPrompt],
                                      engine_prompt)
                 if isinstance(sampling_params, BeamSearchParams):
+                    print("[TRACE] (serving_completion.py) Creating beam_search generator")
                     generator = self.engine_client.beam_search(
                         prompt=engine_prompt,
                         request_id=request_id,
@@ -212,6 +235,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         lora_request=lora_request,
                     )
                 else:
+                    print("[TRACE] (serving_completion.py) Creating standard generate generator")
                     generator = self.engine_client.generate(
                         engine_prompt,
                         sampling_params,
@@ -221,15 +245,20 @@ class OpenAIServingCompletion(OpenAIServing):
                         priority=request.priority,
                     )
 
+                print("[TRACE] (serving_completion.py) Generator created and added to list")
                 generators.append(generator)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
+            print("[TRACE] (serving_completion.py) ValueError during generator creation")
             return self.create_error_response(str(e))
 
+        print(f"[TRACE] (serving_completion.py) All generators created - total: {len(generators)}")
         result_generator = merge_async_iterators(*generators)
+        print("[TRACE] (serving_completion.py) Result generators merged")
 
         model_name = self._get_model_name(request.model, lora_request)
         num_prompts = len(engine_prompts)
+        print(f"[TRACE] (serving_completion.py) Model: {model_name}, num_prompts: {num_prompts}")
 
         # Similar to the OpenAI API, when n != best_of, we do not stream the
         # results. Noting that best_of is only supported in V0. In addition,
@@ -239,7 +268,9 @@ class OpenAIServingCompletion(OpenAIServing):
                   and not request.use_beam_search)
 
         # Streaming response
+        print(f"[TRACE] (serving_completion.py) Stream mode: {stream}")
         if stream:
+            print("[TRACE] (serving_completion.py) Returning streaming response")
             return self.completion_stream_generator(
                 request,
                 request_prompts,
@@ -254,11 +285,15 @@ class OpenAIServingCompletion(OpenAIServing):
             )
 
         # Non-streaming response
+        print("[TRACE] (serving_completion.py) Returning non-streaming response")
         final_res_batch: list[Optional[RequestOutput]] = [None] * num_prompts
         try:
+            print("[TRACE] Collecting all results from generator")
             async for i, res in result_generator:
                 final_res_batch[i] = res
+            print(f"[TRACE] Collected {len(final_res_batch)} results")
 
+            print("[TRACE] Processing and validating results")
             for i, final_res in enumerate(final_res_batch):
                 assert final_res is not None
 
@@ -275,6 +310,7 @@ class OpenAIServingCompletion(OpenAIServing):
             final_res_batch_checked = cast(list[RequestOutput],
                                            final_res_batch)
 
+            print("[TRACE] Converting results to completion response")
             response = self.request_output_to_completion_response(
                 final_res_batch_checked,
                 request,
@@ -284,23 +320,29 @@ class OpenAIServingCompletion(OpenAIServing):
                 tokenizer,
                 request_metadata,
             )
+            print("[TRACE] Completion response created successfully")
         except asyncio.CancelledError:
+            print("[TRACE] Request cancelled by client")
             return self.create_error_response("Client disconnected")
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
+            print("[TRACE] ValueError during result processing")
             return self.create_error_response(str(e))
 
         # When user requests streaming but we don't stream, we still need to
         # return a streaming response with a single event.
         if request.stream:
+            print("[TRACE] Request asked for streaming but returning non-streamed response")
             response_json = response.model_dump_json()
 
             async def fake_stream_generator() -> AsyncGenerator[str, None]:
+                print("[TRACE] Fake stream generator - yielding single event")
                 yield f"data: {response_json}\n\n"
                 yield "data: [DONE]\n\n"
 
             return fake_stream_generator()
 
+        print("[TRACE] create_completion() returning non-streamed response")
         return response
 
     async def completion_stream_generator(
@@ -317,6 +359,7 @@ class OpenAIServingCompletion(OpenAIServing):
         request_metadata: RequestResponseMetadata,
         enable_force_include_usage: bool,
     ) -> AsyncGenerator[str, None]:
+        print(f"[TRACE] completion_stream_generator() called - request_id: {request_id}, model: {model_name}")
         num_choices = 1 if request.n is None else request.n
         previous_text_lens = [0] * num_choices * num_prompts
         previous_num_tokens = [0] * num_choices * num_prompts
@@ -324,6 +367,7 @@ class OpenAIServingCompletion(OpenAIServing):
         num_prompt_tokens = [0] * num_prompts
         num_cached_tokens = None
         first_iteration = True
+        print(f"[TRACE] Stream generator initialized - num_choices: {num_choices}, num_prompts: {num_prompts}")
 
         stream_options = request.stream_options
         if stream_options:
@@ -333,8 +377,10 @@ class OpenAIServingCompletion(OpenAIServing):
                                         stream_options.continuous_usage_stats)
         else:
             include_usage, include_continuous_usage = False, False
+        print(f"[TRACE] Stream options set - include_usage: {include_usage}, include_continuous_usage: {include_continuous_usage}")
 
         try:
+            print("[TRACE] Starting result streaming loop")
             async for prompt_idx, res in result_generator:
                 prompt_token_ids = res.prompt_token_ids
                 prompt_logprobs = res.prompt_logprobs

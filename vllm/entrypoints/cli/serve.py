@@ -38,17 +38,23 @@ class ServeSubcommand(CLISubcommand):
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
+        print(f"[TRACE] ServeSubcommand.cmd called")
         # If model is specified in CLI (as positional arg), it takes precedence
         if hasattr(args, 'model_tag') and args.model_tag is not None:
+            print(f"[TRACE] Using model_tag from positional arg: {args.model_tag}")
             args.model = args.model_tag
 
+        print(f"[TRACE] (serve.py) headless={args.headless}, api_server_count={args.api_server_count}")
         if args.headless or args.api_server_count < 1:
+            print("[TRACE] Running in headless mode")
             run_headless(args)
         else:
             if args.api_server_count > 1:
+                print(f"[TRACE] (serve.py) Running with {args.api_server_count} API servers")
                 run_multi_api_server(args)
             else:
-                # Single API server (this process).
+                # Single API server (this process).W
+                print("[TRACE] Running single API server")
                 uvloop.run(run_server(args))
 
     def validate(self, args: argparse.Namespace) -> None:
@@ -74,13 +80,16 @@ def cmd_init() -> list[CLISubcommand]:
 
 
 def run_headless(args: argparse.Namespace):
+    print("[TRACE] run_headless() started")
 
     if args.api_server_count > 1:
         raise ValueError("api_server_count can't be set in headless mode")
 
     # Create the EngineConfig.
+    print("[TRACE] Creating AsyncEngineArgs from CLI args")
     engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
     usage_context = UsageContext.OPENAI_API_SERVER
+    print("[TRACE] (serve.py) Creating engine config")
     vllm_config = engine_args.create_engine_config(usage_context=usage_context,
                                                    headless=True)
 
@@ -135,14 +144,17 @@ def run_headless(args: argparse.Namespace):
 
 
 def run_multi_api_server(args: argparse.Namespace):
+    print(f"[TRACE] run_multi_api_server() started with {args.api_server_count} servers")
 
     assert not args.headless
     num_api_servers = args.api_server_count
     assert num_api_servers > 0
 
     if num_api_servers > 1:
+        print("[TRACE] (serve.py) Setting up multiprocess Prometheus")
         setup_multiprocess_prometheus()
 
+    print("[TRACE] (serve.py) Setting up server socket")
     listen_address, sock = setup_server(args)
 
     engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
@@ -225,14 +237,17 @@ def run_api_server_worker_proc(listen_address,
                                client_config=None,
                                **uvicorn_kwargs) -> None:
     """Entrypoint for individual API server worker processes."""
+    print(f"[TRACE] run_api_server_worker_proc() started")
 
     # Add process-specific prefix to stdout and stderr.
     from multiprocessing import current_process
-    process_name = current_process().name
+    process_name = mp.current_process().name
     pid = os.getpid()
+    print(f"[TRACE] (serve.py) Process name: {process_name}, PID: {pid}")
     _add_prefix(sys.stdout, process_name, pid)
     _add_prefix(sys.stderr, process_name, pid)
 
+    print("[TRACE] Starting uvloop with run_server_worker")
     uvloop.run(
         run_server_worker(listen_address, sock, args, client_config,
                           **uvicorn_kwargs))

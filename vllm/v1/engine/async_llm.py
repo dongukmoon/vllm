@@ -78,6 +78,7 @@ class AsyncLLM(EngineClient):
         Returns:
             None
         """
+        print("[TRACE] (async_llm.py) AsyncLLM.__init__() called - initializing V1 async engine")
         if not envs.VLLM_USE_V1:
             raise ValueError(
                 "Using V1 AsyncLLMEngine, but envs.VLLM_USE_V1=False. "
@@ -87,33 +88,43 @@ class AsyncLLM(EngineClient):
 
         # Ensure we can serialize custom transformer configs
         maybe_register_config_serialize_by_value()
+        print("[TRACE] (async_llm.py) Registered transformer configs for serialization")
 
         self.model_config = vllm_config.model_config
         self.vllm_config = vllm_config
         self.log_requests = log_requests
         self.log_stats = log_stats
+        print(f"[TRACE] (async_llm.py) Configured model: {self.model_config.model}, log_requests: {self.log_requests}, log_stats: {self.log_stats}")
 
         if self.model_config.skip_tokenizer_init:
+            print("[TRACE] (async_llm.py) Skipping tokenizer initialization (skip_tokenizer_init=True)")
             self.tokenizer = None
         else:
             # Tokenizer (+ ensure liveness if running in another process).
+            print("[TRACE] (async_llm.py) Initializing tokenizer from configs")
             self.tokenizer = init_tokenizer_from_configs(
                 model_config=vllm_config.model_config,
                 scheduler_config=vllm_config.scheduler_config,
                 lora_config=vllm_config.lora_config)
+            print("[TRACE] (async_llm.py) Tokenizer initialization completed")
 
         # Processor (converts Inputs --> EngineCoreRequests).
+        print("[TRACE] (async_llm.py) Creating Processor for input conversion")
         self.processor = Processor(
             vllm_config=vllm_config,
             tokenizer=self.tokenizer,
             mm_registry=mm_registry,
         )
+        print("[TRACE] (async_llm.py) Processor created successfully")
 
         # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).
+        print("[TRACE] (async_llm.py) Creating OutputProcessor for output processing")
         self.output_processor = OutputProcessor(self.tokenizer,
                                                 log_stats=self.log_stats)
+        print("[TRACE] (async_llm.py) OutputProcessor created successfully")
 
         # EngineCore (starts the engine in background process).
+        print("[TRACE] (async_llm.py) Creating EngineCoreClient for multiprocess backend")
         self.engine_core = EngineCoreClient.make_async_mp_client(
             vllm_config=vllm_config,
             executor_class=executor_class,
@@ -121,24 +132,30 @@ class AsyncLLM(EngineClient):
             client_addresses=client_addresses,
             client_index=client_index,
         )
+        print("[TRACE] (async_llm.py) EngineCoreClient created, engine ranks managed: {0}".format(self.engine_core.engine_ranks_managed))
 
         # Loggers.
         self.logger_manager: Optional[StatLoggerManager] = None
         if self.log_stats:
+            print("[TRACE] (async_llm.py) Creating StatLoggerManager for stats logging")
             self.logger_manager = StatLoggerManager(
                 vllm_config=vllm_config,
                 engine_idxs=self.engine_core.engine_ranks_managed,
                 custom_stat_loggers=stat_loggers,
             )
             self.logger_manager.log_engine_initialized()
+            print("[TRACE] (async_llm.py) StatLoggerManager initialized and engine logged")
+        else:
+            print("[TRACE] (async_llm.py) Skipping stats logging (log_stats=False)")
 
         self.output_handler: Optional[asyncio.Task] = None
         try:
             # Start output handler eagerly if we are in the asyncio eventloop.
             asyncio.get_running_loop()
+            print("[TRACE] (async_llm.py) Event loop detected, starting output handler")
             self._run_output_handler()
         except RuntimeError:
-            pass
+            print("[TRACE] (async_llm.py) No event loop running yet, output handler will be started on first generate() call")
 
     @classmethod
     def from_vllm_config(
@@ -225,32 +242,42 @@ class AsyncLLM(EngineClient):
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
+        print(f"[TRACE] (async_llm.py) add_request() called - request_id: {request_id}, priority: {priority}")
         if self.errored:
+            print(f"[TRACE] (async_llm.py) Engine is errored, raising EngineDeadError for request_id: {request_id}")
             raise EngineDeadError()
 
         is_pooling = isinstance(params, PoolingParams)
+        print(f"[TRACE] (async_llm.py) Request type: {'pooling' if is_pooling else 'generation'}")
 
         # Create a new output collector for the request.
         queue = RequestOutputCollector(output_kind=params.output_kind)
+        print(f"[TRACE] (async_llm.py) Created RequestOutputCollector for request_id: {request_id}")
 
         # Convert Input --> Request.
+        print(f"[TRACE] (async_llm.py) Processing inputs for request_id: {request_id}")
         prompt_str, request = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
             tokenization_kwargs, trace_headers, priority, data_parallel_rank)
+        print(f"[TRACE] (async_llm.py) Processed inputs, prompt_tokens: {len(prompt_str.split()) if prompt_str else 0}")
 
         if is_pooling or params.n == 1:
+            print(f"[TRACE] (async_llm.py) Single request case (pooling={is_pooling} or n=1), adding request directly")
             await self._add_request(request, prompt_str, None, 0, queue)
             return queue
 
         # Fan out child requests (for n>1).
+        print(f"[TRACE] (async_llm.py) Fanning out {params.n} child requests for request_id: {request_id}")
         parent_request = ParentRequest(request_id, params)
         for idx in range(params.n):
             request_id, params = parent_request.get_child_info(idx)
             child_request = request if idx == params.n - 1 else copy(request)
             child_request.request_id = request_id
             child_request.sampling_params = params
+            print(f"[TRACE] (async_llm.py) Adding child request {idx + 1}/{params.n}, request_id: {request_id}")
             await self._add_request(child_request, prompt_str, parent_request,
                                     idx, queue)
+        print(f"[TRACE] (async_llm.py) Completed fanning out {params.n} child requests")
         return queue
 
     async def _add_request(self, request: EngineCoreRequest,
@@ -258,15 +285,19 @@ class AsyncLLM(EngineClient):
                            parent_req: Optional[ParentRequest], index: int,
                            queue: RequestOutputCollector):
 
+        print(f"[TRACE] (async_llm.py) _add_request() called - request_id: {request.request_id}, index: {index}, has_parent: {parent_req is not None}")
         # Add the request to OutputProcessor (this process).
+        print(f"[TRACE] (async_llm.py) Adding request to OutputProcessor - request_id: {request.request_id}")
         self.output_processor.add_request(request, prompt, parent_req, index,
                                           queue)
 
         # Add the EngineCoreRequest to EngineCore (separate process).
+        print(f"[TRACE] (async_llm.py) Adding request to EngineCore via async - request_id: {request.request_id}")
         await self.engine_core.add_request_async(request)
 
         if self.log_requests:
             logger.info("Added request %s.", request.request_id)
+        print(f"[TRACE] (async_llm.py) Request added successfully - request_id: {request.request_id}")
 
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion
@@ -298,12 +329,15 @@ class AsyncLLM(EngineClient):
         returning the RequestOutput back to the caller.
         """
 
+        print(f"[TRACE] (async_llm.py) generate() called - request_id: {request_id}, temperature: {sampling_params.temperature}, top_p: {sampling_params.top_p}")
         try:
             # We start the output_handler on the first call to generate() so
             # we can call __init__ before the event loop, which enables us
             # to handle startup failure gracefully in the OpenAI server.
+            print(f"[TRACE] (async_llm.py) Starting output handler for generation - request_id: {request_id}")
             self._run_output_handler()
 
+            print(f"[TRACE] (async_llm.py) Adding request to engine - request_id: {request_id}")
             q = await self.add_request(
                 request_id,
                 prompt,
@@ -313,24 +347,31 @@ class AsyncLLM(EngineClient):
                 priority=priority,
                 data_parallel_rank=data_parallel_rank,
             )
+            print(f"[TRACE] (async_llm.py) Request added to engine, starting output streaming - request_id: {request_id}")
 
             # The output_handler task pushes items into the queue.
             # This task pulls from the queue and yields to caller.
             finished = False
+            output_count = 0
             while not finished:
                 # Note: drain queue without await if possible (avoids
                 # task switching under load which helps performance).
                 out = q.get_nowait() or await q.get()
 
+                output_count += 1
+                print(f"[TRACE] (async_llm.py) Yielding output #{output_count} - request_id: {request_id}, finished: {out.finished}")
                 # Note: both OutputProcessor and EngineCore handle their
                 # own request cleanup based on finished.
                 finished = out.finished
                 yield out
 
+            print(f"[TRACE] (async_llm.py) Generation complete - request_id: {request_id}, total outputs: {output_count}")
+
         # If the request is disconnected by the client, generate()
         # is cancelled or the generator is garbage collected. So,
         # we abort the request if we end up here.
         except (asyncio.CancelledError, GeneratorExit):
+            print(f"[TRACE] (async_llm.py) Generation cancelled or generator exiting - request_id: {request_id}")
             await self.abort(request_id)
             if self.log_requests:
                 logger.info("Request %s aborted.", request_id)
@@ -338,12 +379,14 @@ class AsyncLLM(EngineClient):
 
         # Engine is dead. Do not abort since we shut down.
         except EngineDeadError:
+            print(f"[TRACE] (async_llm.py) Engine is dead - request_id: {request_id}")
             if self.log_requests:
                 logger.info("Request %s failed (engine dead).", request_id)
             raise
 
         # Request validation error.
         except ValueError:
+            print(f"[TRACE] (async_llm.py) Request validation error - request_id: {request_id}")
             if self.log_requests:
                 logger.info("Request %s failed (bad request).", request_id)
             raise
@@ -359,8 +402,10 @@ class AsyncLLM(EngineClient):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
 
         if self.output_handler is not None:
+            print("[TRACE] (async_llm.py) Output handler already running, skipping creation")
             return
 
+        print("[TRACE] (async_llm.py) Creating and starting output handler task")
         # Ensure that the task doesn't have a circular ref back to the AsyncLLM
         # object, or else it won't be garbage collected and cleaned up properly.
         engine_core = self.engine_core
@@ -369,11 +414,16 @@ class AsyncLLM(EngineClient):
         logger_manager = self.logger_manager
 
         async def output_handler():
+            print("[TRACE] (async_llm.py) Output handler task started")
             try:
+                iteration_num = 0
                 while True:
+                    iteration_num += 1
                     # 1) Pull EngineCoreOutputs from the EngineCore.
+                    print(f"[TRACE] (async_llm.py) Output handler iteration #{iteration_num} - pulling outputs from EngineCore")
                     outputs = await engine_core.get_output_async()
                     num_outputs = len(outputs.outputs)
+                    print(f"[TRACE] (async_llm.py) Received {num_outputs} outputs from EngineCore (engine_index: {outputs.engine_index})")
 
                     iteration_stats = IterationStats() if (
                         log_stats and num_outputs) else None
@@ -383,13 +433,17 @@ class AsyncLLM(EngineClient):
                     # event loop for too long.
                     if num_outputs <= VLLM_V1_OUTPUT_PROC_CHUNK_SIZE:
                         slices = (outputs.outputs, )
+                        print(f"[TRACE] (async_llm.py) Processing outputs in single chunk")
                     else:
+                        num_slices = cdiv(num_outputs, VLLM_V1_OUTPUT_PROC_CHUNK_SIZE)
                         slices = np.array_split(
                             outputs.outputs,
-                            cdiv(num_outputs, VLLM_V1_OUTPUT_PROC_CHUNK_SIZE))
+                            num_slices)
+                        print(f"[TRACE] (async_llm.py) Processing {num_outputs} outputs in {num_slices} chunks")
 
                     for i, outputs_slice in enumerate(slices):
                         # 2) Process EngineCoreOutputs.
+                        print(f"[TRACE] (async_llm.py) Processing chunk {i + 1}/{len(slices)} - {len(outputs_slice)} outputs")
                         processed_outputs = output_processor.process_outputs(
                             outputs_slice, outputs.timestamp, iteration_stats)
                         # NOTE: RequestOutputs are pushed to their queues.
@@ -400,8 +454,10 @@ class AsyncLLM(EngineClient):
                             await asyncio.sleep(0)
 
                         # 3) Abort any reqs that finished due to stop strings.
-                        await engine_core.abort_requests_async(
-                            processed_outputs.reqs_to_abort)
+                        if processed_outputs.reqs_to_abort:
+                            print(f"[TRACE] (async_llm.py) Aborting {len(processed_outputs.reqs_to_abort)} requests due to stop strings")
+                            await engine_core.abort_requests_async(
+                                processed_outputs.reqs_to_abort)
 
                     # 4) Logging.
                     # TODO(rob): make into a coroutine and launch it in
@@ -413,19 +469,24 @@ class AsyncLLM(EngineClient):
                             iteration_stats=iteration_stats,
                         )
             except Exception as e:
+                print(f"[TRACE] (async_llm.py) Output handler exception: {type(e).__name__}: {e}")
                 logger.exception("AsyncLLM output_handler failed.")
                 output_processor.propagate_error(e)
 
         self.output_handler = asyncio.create_task(output_handler())
+        print("[TRACE] (async_llm.py) Output handler task created and scheduled")
 
     async def abort(self, request_id: str) -> None:
         """Abort RequestId in OutputProcessor and EngineCore."""
 
+        print(f"[TRACE] (async_llm.py) abort() called - request_id: {request_id}")
         request_ids = self.output_processor.abort_requests((request_id, ))
+        print(f"[TRACE] (async_llm.py) Aborted in OutputProcessor, aborting in EngineCore - request_id: {request_id}")
         await self.engine_core.abort_requests_async(request_ids)
 
         if self.log_requests:
             logger.info("Aborted request %s.", request_id)
+        print(f"[TRACE] (async_llm.py) Request abort completed - request_id: {request_id}")
 
     async def encode(
         self,
@@ -451,12 +512,15 @@ class AsyncLLM(EngineClient):
         returning the RequestOutput back to the caller.
         """
 
+        print(f"[TRACE] (async_llm.py) encode() called - request_id: {request_id}, pooling_type: {pooling_params.pooling_type}")
         try:
             # We start the output_handler on the first call to generate() so
             # we can call __init__ before the event loop, which enables us
             # to handle startup failure gracefully in the OpenAI server.
+            print(f"[TRACE] (async_llm.py) Starting output handler for encoding - request_id: {request_id}")
             self._run_output_handler()
 
+            print(f"[TRACE] (async_llm.py) Adding pooling request to engine - request_id: {request_id}")
             q = await self.add_request(
                 request_id,
                 prompt,
@@ -466,10 +530,12 @@ class AsyncLLM(EngineClient):
                 priority=priority,
                 tokenization_kwargs=tokenization_kwargs,
             )
+            print(f"[TRACE] (async_llm.py) Pooling request added to engine, starting output streaming - request_id: {request_id}")
 
             # The output_handler task pushes items into the queue.
             # This task pulls from the queue and yields to caller.
             finished = False
+            output_count = 0
             while not finished:
                 # Note: drain queue without await if possible (avoids
                 # task switching under load which helps performance).
@@ -477,12 +543,17 @@ class AsyncLLM(EngineClient):
                 assert isinstance(out, PoolingRequestOutput)
                 # Note: both OutputProcessor and EngineCore handle their
                 # own request cleanup based on finished.
+                output_count += 1
+                print(f"[TRACE] (async_llm.py) Yielding pooling output #{output_count} - request_id: {request_id}, finished: {out.finished}")
                 finished = out.finished
                 yield out
+
+            print(f"[TRACE] (async_llm.py) Encoding complete - request_id: {request_id}, total outputs: {output_count}")
 
         # If the request is disconnected by the client, generate()
         # is cancelled. So, we abort the request if we end up here.
         except asyncio.CancelledError:
+            print(f"[TRACE] (async_llm.py) Encoding cancelled - request_id: {request_id}")
             await self.abort(request_id)
             if self.log_requests:
                 logger.info("Request %s aborted.", request_id)
@@ -490,18 +561,21 @@ class AsyncLLM(EngineClient):
 
         # Engine is dead. Do not abort since we shut down.
         except EngineDeadError:
+            print(f"[TRACE] (async_llm.py) Engine is dead during encoding - request_id: {request_id}")
             if self.log_requests:
                 logger.info("Request %s failed (engine dead).", request_id)
             raise
 
         # Request validation error.
         except ValueError:
+            print(f"[TRACE] (async_llm.py) Request validation error during encoding - request_id: {request_id}")
             if self.log_requests:
                 logger.info("Request %s failed (bad request).", request_id)
             raise
 
         # Unexpected error in the generate() task (possibly recoverable).
         except Exception as e:
+            print(f"[TRACE] (async_llm.py) Encoding error - request_id: {request_id}, error: {type(e).__name__}")
             await self.abort(request_id)
             if self.log_requests:
                 logger.info("Request %s failed.", request_id)
