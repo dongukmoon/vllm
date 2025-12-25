@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document explains the complete journey from a user's `vllm serve` command and client prompt requests all the way down to CUDA kernel execution on the GPU. It's designed for both beginners and intermediate experts.
+This document explains the complete journey from a user's `vllm serve` command and client prompt requests all the way down to CUDA kernel execution on the GPU.
 
 ---
 
@@ -1018,3 +1018,4 @@ The journey from `vllm serve --model gpt2` and client requests to CUDA kernels i
 7. **Response Stream** - Return tokens to client
 
 Each step leverages GPU acceleration, with PagedAttention kernels being the most critical and optimized part of the system. The entire forward pass for one token takes only 5-15ms on modern GPUs!
+
